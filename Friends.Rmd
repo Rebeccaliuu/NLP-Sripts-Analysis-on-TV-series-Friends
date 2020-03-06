@@ -1,0 +1,349 @@
+---
+title: "Friends Scripts Analysis"
+author: "Gangyan Liu"
+date: "2/26/2020"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r, include=FALSE}
+library(rvest)
+library(stringr)
+library(magrittr)
+library(wordcloud2)
+library(plyr)
+library(miscTools)
+library(stringr)
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(dplyr)
+library(magrittr)
+library(gtable)
+library(grid)
+library(gridExtra)
+library(reshape2)
+library(plotly)
+library(RColorBrewer)
+library(wordcloud)
+library(SnowballC)
+library(textclean)
+library(stringi)
+library(corpus)
+library(sentimentr)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(stringr)
+library(ngram)
+library(IRdisplay)
+library(tidyverse)
+library(tm)
+library(textstem)
+library(stopwords)
+library(textdata)
+library(tidytext)
+library(topicmodels) 
+library(SnowballC)
+```
+
+This is a scripts analysis of my favorite TV series: Friends.
+
+# Data Preparation
+
+```{r}
+extractSeason <- function(link) {
+  if (startsWith(link, "10")) {
+    10
+  } else {
+    str_split(link, "season|/")[[1]][2] %>% as.numeric()
+  }
+}
+
+extractTitle <- function(season, html) {
+  title <- html_nodes(html, "title") %>% html_text() %>% paste(collapse = " ")
+  if (season == 10) {
+    title <- str_split(title, " - ")[[1]][3]
+  }
+  if (season != 9 & length(title) > 0) {
+    title
+  } else {
+    ""
+  }
+}
+
+getSeason9Titles <- function() {
+  titles <- read_html("https://en.wikipedia.org/wiki/Friends_(season_9)") %>%
+    html_nodes(".summary") %>%
+    html_text()
+  map_chr(titles[4:26], function(x) str_split(x, "\"")[[1]][2])
+}
+
+url <- "http://livesinabox.com/friends/scripts.shtml"
+
+episodes_df <- read_html(url) %>%
+  html_nodes("a") %>%
+  html_attr("href") %>%
+  tibble(link = .) %>%
+  slice(46:275) %>%
+  unique() %>%
+  mutate(season = map_dbl(link, extractSeason),
+         html = map(paste0("http://livesinabox.com/friends/", link), read_html),
+         episodeTitle = map2_chr(season, html, extractTitle)) %>%
+  filter(!startsWith(episodeTitle, "Friends")) %>%
+  group_by(season) %>%
+  mutate(episodeNum = row_number()) %>%
+  ungroup()
+
+episodes_df$episodeTitle[episodes_df$season == 9] <- getSeason9Titles()
+
+episodes_df <- episodes_df %>% select(-link)
+
+getPeronLinePairs <- function(html) {
+  html %>%
+    html_nodes("body") %>%
+    html_nodes("p") %>%
+    html_text() %>%
+    tibble(text = .) %>%
+    filter(str_detect(text, "^[A-Z][a-zA-Z. ]+:")) %>%
+    unlist() %>%
+    unname() %>%
+    str_to_lower() %>%
+    str_replace_all("\n", " ") %>%
+    str_replace(":", "\\|\\|")
+}
+
+getPeronLinePairsSeasonIrregulars <- function(html) {
+  html %>%
+    html_nodes("body") %>%
+    html_text() %>%
+    str_split(., "\n") %>%
+    unlist %>%
+    tibble(text = .) %>%
+    filter(str_detect(text, "^[A-Z][a-zA-Z. ]+:")) %>%
+    unlist() %>%
+    unname() %>%
+    str_to_lower() %>%
+    str_replace_all("\n", " ") %>%
+    str_replace(":", "\\|\\|")
+}
+
+personLines_df <- episodes_df %>%
+  filter(!(season == 2 & episodeNum %in% c(9, 12:23)) &
+           !(season == 9 & episodeNum %in% c(7, 11, 15))) %>%
+  mutate(personLine = map(html, getPeronLinePairs))
+
+irregulars <- episodes_df %>%
+  filter((season == 2 & episodeNum %in% c(9, 12:23)) |
+           (season == 9 & episodeNum %in% c(7, 11, 15))) %>%
+  mutate(personLine = map(html, getPeronLinePairsSeasonIrregulars))
+
+personLines_df %<>%
+  rbind(irregulars) %>%
+  group_by(season, episodeNum, episodeTitle) %>%
+  unnest(personLine) %>%
+  ungroup() %>%
+  separate(personLine, c("person", "line"), sep = "\\|\\|") %>%
+  filter(!str_detect(person, " by"))
+
+personLines_df <- personLines_df %>% select(season, episodeNum, person, line)
+
+capFirst <- function(s) {
+  paste(toupper(substring(s, 1, 1)), substring(s, 2), sep = "")
+}
+
+personLines_df$person <- capFirst(personLines_df$person)
+
+personLines_df$line <- removePunctuation(personLines_df$line)
+
+personLines_df$person <- as.character(personLines_df$person)
+
+personLines_df <- personLines_df %>%
+  filter(person=='Monica'|person=="Ross"|person=="Rachel"|person=="Joey"|person=="Chandler"|person=="Phoebe")
+```
+
+# Who is the lead character?
+
+The first question I want to explore is who is the lead character. A lead character tends to have more lines of script or more words than other character, so I'm going to analyze those two indicators.
+
+### who is the character with the highest number of lines?
+
+```{r}
+df <- personLines_df 
+
+df<- df%>%
+  group_by(person) %>%
+  mutate(n=n())%>%
+  select(person,n)%>%
+  unique()
+
+p <- ggplot(df, aes(reorder(person, -n), n, fill=person,alpha=0.5))+geom_col(stat="identity")+theme_minimal()+xlab("Character")+ylab("Counts of Lines")+ ggtitle("Number of lines per character")
+
+p
+```
+
+This graph presents number of lines per character. we can tell that Rachel and Ross have the highest number of lines.  
+
+### Who is the most talkative character? (Who speaks the most words?)
+
+```{r}
+countNWords <- function(line) {
+  str_count(line, " ") + 1
+}
+
+df <- personLines_df %>%
+  mutate(nWords = map_dbl(line, countNWords)) %>%
+  group_by(person) %>%
+  tally(nWords) %>%
+  arrange(-n) %>%
+  head()
+
+ggplot(df, aes(reorder(person, -n), n, fill=person,alpha=0.5))+geom_col(stat="identity")+theme_minimal()+xlab("Character")+ylab("Counts of Words")+ggtitle("Number of words per character")
+
+```
+
+This graph presents number of words per character. Again, Rachel and Ross have the highest number of words. 
+
+Thus we can conclude that Rachel is the lead character, and Rachel together with Ross is the lead storyline in this TV series.
+
+# What are the words that each character mentions most? (excluding stop words)
+
+Next, I want to know what are the things that each character mentions most?
+
+```{r}
+s <- strsplit(personLines_df$line, split = " ")
+words_person <- data.frame(person = rep(personLines_df$person, sapply(s, length)), word = unlist(s))
+words_person <- words_person%>%
+  filter(word!="")
+
+
+words_person <- words_person%>%
+  filter(person=='Monica'|person=="Ross"|person=="Rachel"|person=="Joey"|person=="Chandler"|person=="Phoebe")
+
+
+words_person$word <- as.character(words_person$word)
+
+
+#Remove stopwords
+
+tokens = words_person %>% 
+  unnest_tokens(text, input=word)
+
+
+data(stop_words)
+custom_stop_words <- tibble(word = c("yeah","oh","dont","gonna","gotta","cmon","im","iim","(to","hey","its","okay","uh","well","it", "don","didnt","hes", "ll","ii","II","didn"))
+
+tidy_text <- tokens %>%
+  anti_join(stop_words,by=c("text" = "word"))%>%
+  anti_join(custom_stop_words,by=c("text" = "word"))
+
+tidy_text_count <- tidy_text%>%
+  group_by(person,text)%>%
+  summarise(count=n())
+
+
+words_mentioned <- tidy_text_count%>%
+  group_by(person)%>%
+  mutate(max=max(count))%>%
+  filter(max==count)%>%
+  unique()%>%
+  select(-max)
+
+words_mentioned
+```
+
+After parsing and cleaning data, I got the above table which contains the character, the words they mention most, and the word counts. Not surprisingly, the words that are most frequenly mentioned are each character's names. The result makes sense and aligns with the setting, for example, the word that Chandler mentions most is Joey, because they are roomates, and Monica mentions Chandler the most because they are couple.
+
+```{r}
+tidy_text%>%
+  count(text) %>% 
+  wordcloud2(minSize=15, color = "random-light", backgroundColor = "white")
+```
+
+
+Except from each character's name, I want to get more insights of word frequency  so I visualized word counts using wordcloud and found that the words "love", "guy" and "god" are very frequent, I think it's because there are many interjections in the script like "oh my god" and "Hey guys".
+
+# What are the most important words for each character? 
+### Topic modeling with TF-IDF
+
+In order to know what words are the most important ones to each character, I ran the topic modeling with TF-IDF.
+
+```{r}
+top_terms_by_topic_tfidf <- function(text_df, text_column, group_column, plot = T){
+    group_column <- enquo(group_column)
+    text_column <- enquo(text_column)
+    
+    words <- text_df %>%
+      unnest_tokens(word, !!text_column) %>%
+      count(!!group_column, word) %>% 
+      ungroup()
+
+    total_words <- words %>% 
+      group_by(!!group_column) %>% 
+      summarize(total = sum(n))
+
+    words <- left_join(words, total_words)
+
+    tf_idf <- words %>%
+      bind_tf_idf(word, !!group_column, n) %>%
+      select(-total) %>%
+      arrange(desc(tf_idf)) %>%
+      mutate(word = factor(word, levels = rev(unique(word))))
+    
+    if(plot == T){
+        group_name <- quo_name(group_column)
+        
+        tf_idf %>% 
+          group_by(!!group_column) %>% 
+          top_n(10) %>% 
+          ungroup %>%
+          ggplot(aes(word, tf_idf, fill = as.factor(group_name))) +
+          geom_col(show.legend = FALSE) +
+          labs(x = NULL, y = "tf-idf") +
+          facet_wrap(reformulate(group_name), scales = "free") +
+          coord_flip()
+    }else{
+        return(tf_idf)
+    }
+}
+
+```
+
+```{r}
+top_terms_by_topic_tfidf(text_df = personLines_df,
+                         text_column = line,
+                         group_column = person, 
+                         plot = T) 
+```
+
+The above graph gives me some interesting insights and reminds me of some plots in the TV series. For example, one of the most important word for Joey is casting becuase he is an actor. For Rachel, "gavin" and "joshua" are the most important words for her because she had a crush on both of them. 
+
+# Sentiment score analysis for each character
+
+Finally, to tell who has the most upbeat personality, I conducted a sentiment score analysis for each character's words.
+
+```{r}
+sentimentscore <- sentiment(personLines_df$line,polarity_dt =lexicon::hash_sentiment_loughran_mcdonald)
+
+sentimentscore <- sentimentscore%>%
+  group_by(element_id)%>%
+  mutate(mean_score=mean(sentiment))%>%
+  select(element_id, mean_score)
+
+sentimentscore <- unique(sentimentscore)
+
+personLines_df$sentimentscore <- sentimentscore$mean_score
+
+personLines_df <- personLines_df%>%
+  group_by(person)%>%
+  summarise(mean_senti_score = mean(sentimentscore))
+
+ggplot(personLines_df, aes(reorder(person, -mean_senti_score), mean_senti_score, fill=person,alpha=0.5))+geom_col(stat="identity")+theme_minimal()+xlab("Character")+ylab("Sentiment Score")+ggtitle("Sentiment score per character")
+```
+
+From the graph we can tell that Phoebe got the highest sentiment score, and this is a good demonstration that she has the most positive and upbeat personality, and I totally agree with that after watching the TV series.
